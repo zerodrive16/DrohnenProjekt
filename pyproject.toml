@@ -1,0 +1,17 @@
+[project]
+name = "drohnenprojekt"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Stefan Nguyen", email = "stefan16.nguyen@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+drohnenprojekt = "drohnenprojekt:main"
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
