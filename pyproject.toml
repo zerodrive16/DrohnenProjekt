@@ -7,7 +7,12 @@ authors = [
     { name = "Stefan Nguyen", email = "stefan16.nguyen@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "numpy>=2.5.4",
+    "opencv-python>=5.0.0.93",
+    "pymavlink>=2.4.50",
+    "ultralytics>=8.4.177",
+]
 
 [project.scripts]
 drohnenprojekt = "drohnenprojekt:main"
