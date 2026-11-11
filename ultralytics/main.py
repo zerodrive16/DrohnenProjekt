@@ -7,8 +7,8 @@ from pathlib import Path
 DOOR_MODEL = Path(__file__).parent / "DoorDetect-Dataset/runs/doors/weights/best.pt"
 
 # Camera backend: use ONE of the two lines, comment out the other
-CAM_BACKEND = cv2.CAP_DSHOW   # Windows: DirectShow
-# CAM_BACKEND = cv2.CAP_V4L2  # Linux: V4L2
+#CAM_BACKEND = cv2.CAP_DSHOW   # Windows: DirectShow
+CAM_BACKEND = cv2.CAP_V4L2  # Linux: V4L2
 
 
 def open_camera(index: int = 0) -> cv2.VideoCapture:
@@ -74,6 +74,6 @@ if __name__ == "__main__":
 	/dev/media0
 	/dev/media1
     '''
-    cam = int(sys.argv[1] if len(sys.argv) > 1 else find_camera())
-    mdl = sys.argv[2] if len(sys.argv) > 2 else "yolo26n.pt"
+    cam = int(sys.argv[1]) if len(sys.argv) > 1 else 4  # /dev/video4
+    mdl = sys.argv[2] if len(sys.argv) > 2 else "yolo26m-objv1-150.pt"
     main(cam, mdl)

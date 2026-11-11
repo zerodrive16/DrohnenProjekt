@@ -1,0 +1,6 @@
+- Nutzung von ArduPilot, der FlashSpeicher im Mikrocontroller ist nicht ausreichend, muss konfiguriert werden, sodass
+nur die wichtigen Features beibehalten werden "custom.ardupilot.org"
+- Weiteres Problem mit geringem UART Schnittstellen. Nur 1 zur verfügung brauchen Pi und optical flow lidar. Entweder: 
+GPS-weglassen weil Innenraum sowieso keinen Sinn macht, I2C Connector aber nutzt ein anderes Protokoll
+- PX4 für Position und Höhenhaltung und ausweichen von Hindernissen benötigt zusätzliche Konfigurationen, da wir von 
+der Hardware limitiert sind
