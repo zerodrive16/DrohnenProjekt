@@ -12,6 +12,8 @@ dependencies = [
     "opencv-python>=5.0.0.93",
     "pymavlink>=2.4.50",
     "ultralytics>=8.4.177",
+    "torch",
+    "torchvision",
 ]
 
 [project.scripts]
@@ -20,3 +22,12 @@ drohnenprojekt = "drohnenprojekt:main"
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
