@@ -25,6 +25,7 @@ uv.lock
 # Ultralytics / YOLO
 runs/
 *.pt
+!models/*.pt
 *.onnx
 *.engine
 *.tflite
@@ -52,4 +53,10 @@ Thumbs.db
 
 commands.md
 tasks.md
-training/
+
+# Training data (large, rebuildable with training/build_dataset.py)
+training/dataset/
+training/downloads/
+training/*.pt
+ultralytics/DoorDetect-Dataset/
+training/pseudo_label_previews/
