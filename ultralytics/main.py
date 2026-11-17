@@ -4,38 +4,24 @@ import torch
 from ultralytics import YOLO
 from pathlib import Path 
 
-DOOR_MODEL = Path(__file__).parent / "DoorDetect-Dataset/runs/doors/weights/best.pt"
+MERGED_MODEL = Path(__file__).parent.parent / "models/merged_best.pt"
 
-# Camera backend: use ONE of the two lines, comment out the other
-#CAM_BACKEND = cv2.CAP_DSHOW   # Windows: DirectShow
-CAM_BACKEND = cv2.CAP_V4L2  # Linux: V4L2
+CAM_BACKEND = cv2.CAP_V4L2
 
 
-def open_camera(index: int = 0) -> cv2.VideoCapture:
-    cap = cv2.VideoCapture(index, CAM_BACKEND)
+def open_camera(source) -> cv2.VideoCapture:
+    cap = cv2.VideoCapture(source, CAM_BACKEND)
     if not cap.isOpened():
-        print(f"Could not open camera with index {index}")
+        print(f"Could not open camera: {source}")
         sys.exit(1)
     return cap
 
 
-# Probes camera indices (Linux: see v4l2-ctl --list-devices)
-def find_camera(max_index: int = 4) -> int:
-    for index in range(max_index):
-        cap = cv2.VideoCapture(index, CAM_BACKEND)
-        ok, _ = cap.read() if cap.isOpened() else (False, None)
-        cap.release()
-        if ok:
-            return index
-    print("No available camera found.")
-    sys.exit(1)
 
-
-def main(index: int, model_name: str = "yolo26n.pt") -> None:
+def main(index, model_path: str = str(MERGED_MODEL)) -> None:
     device = 0 if torch.cuda.is_available() else "cpu"
-    print(f"Model: {model_name}, Device: {device}")
-    model = YOLO(model_name)
-    door_model = YOLO(str(DOOR_MODEL))
+    print(f"Model: {model_path}, Device: {device}")
+    model = YOLO(model_path)
 
     cap = open_camera(index)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -52,8 +38,7 @@ def main(index: int, model_name: str = "yolo26n.pt") -> None:
             break
 
         results = model.predict(frame, conf=conf, imgsz=640, verbose=False)[0]
-        door_results = door_model.predict(frame, conf=conf, imgsz=640, verbose=False)[0]
-        display = door_results.plot(img=results.plot())
+        display = results.plot()
 
         cv2.imshow("Camera + Yolo", display)
         if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
@@ -74,6 +59,7 @@ if __name__ == "__main__":
 	/dev/media0
 	/dev/media1
     '''
-    cam = int(sys.argv[1]) if len(sys.argv) > 1 else 4  # /dev/video4
-    mdl = sys.argv[2] if len(sys.argv) > 2 else "yolo26m-objv1-150.pt"
+
+    cam = "/dev/video0"
+    mdl = sys.argv[2] if len(sys.argv) > 2 else str(MERGED_MODEL)
     main(cam, mdl)
