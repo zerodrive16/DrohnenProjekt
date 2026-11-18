@@ -17,8 +17,10 @@ Start:
     python lidar_map3d.py --pi 100.83.11.79      # LiDAR am Pi (pi_streamer.py läuft dort)
     python lidar_map3d.py --replay scan_XXXX.bin # Pi-Aufzeichnung abspielen
 
-Höhe: per Taste (+/-). Kommt vom Pi auch die Höhe des Flugcontrollers
-(pi_streamer.py --mav ...), wird automatisch diese genommen.
+Höhe: per Taste (+/-). Läuft der Pi mit Flugcontroller (pi_streamer.py --mav ...),
+kommt die Höhe automatisch vom Höhenmesser (MTF-01P), und die Neigung wird
+ausgeglichen: jeder Punkt bekommt seine echte Höhe. Ein geneigter Scan trifft
+so gleich mehrere Schichten.
 
 So scannst du:
     1. Auf der Starthöhe (z. B. Tischhöhe) einmal langsam durch den Raum.
@@ -55,12 +57,18 @@ class LayerMap:
     def __init__(self):
         self.layers = {}                         # schicht_index -> GridMap
 
-    def update(self, z, pose, pts_world):
-        k = int(math.floor(z / LAYER_H + 1e-9))
-        if k not in self.layers:
-            self.layers[k] = lm.GridMap(lm.MAP_SIZE_M, lm.RESOLUTION)
-            print(f"Neue Schicht: {k * LAYER_H:.2f} - {(k + 1) * LAYER_H:.2f} m")
-        self.layers[k].update(pose, pts_world)
+    def update(self, z, pose, pts_world, zrel=None):
+        """z = Höhe des LiDARs, zrel = Höhe jedes Punkts relativ zum LiDAR (bei Neigung)."""
+        zp = np.full(len(pts_world), z) if zrel is None else z + zrel
+        ks = np.floor(zp / LAYER_H + 1e-9).astype(int)
+        for k in np.unique(ks):
+            m = ks == k
+            if m.sum() < 5:
+                continue
+            if k not in self.layers:
+                self.layers[k] = lm.GridMap(lm.MAP_SIZE_M, lm.RESOLUTION)
+                print(f"Neue Schicht: {k * LAYER_H:.2f} - {(k + 1) * LAYER_H:.2f} m")
+            self.layers[k].update(pose, pts_world[m])
 
     def points(self):
         """-> (N,3) Punkte aller belegten Zellen, z = Schichtmitte."""
@@ -140,25 +148,18 @@ def lidar_thread(port, q, stop, record, height):
             z = height[0]
             if record is not None:
                 record.append((time.time(), ang, dist, inten, z))
-            q.put((ang, dist, z))
+            q.put((ang, dist, z, None))
     finally:
         lidar.stop()
 
 
-def height_from_pose(pose):
-    """Höhe aus LOCAL_POSITION_NED (z zeigt nach unten) oder None."""
-    if pose is None or not math.isfinite(pose[5]):
-        return None
-    return -pose[5]
-
-
 def udp_thread(port, q, stop, record, height, stats, pi=None):
-    for t, ang, dist, inten, pose in lm.udp_source(port, stop, stats, pi):
-        hz = height_from_pose(pose)
+    for t, ang, dist, inten, sens in lm.udp_source(port, stop, stats, pi):
+        hz = lm.sensor_height(sens)
         z = hz if hz is not None else height[0]
         if record is not None:
             record.append((t, ang, dist, inten, z))
-        q.put((ang, dist, z))
+        q.put((ang, dist, z, sens))
 
 
 def replay_thread(path, q, stop, speed, height):
@@ -167,15 +168,15 @@ def replay_thread(path, q, stop, speed, height):
     for t, ang, dist, inten, extra in lm.replay_source(path):
         if stop.is_set():
             return
-        if path.lower().endswith(".bin"):             # Pi-Aufzeichnung: Höhe vom Flugcontroller
-            hz = height_from_pose(extra)
-            z = hz if hz is not None else height[0]
+        if isinstance(extra, dict):                   # Pi-Aufzeichnung: Höhe/Lage vom Flugcontroller
+            hz = lm.sensor_height(extra)
+            z, sens = (hz if hz is not None else height[0]), extra
         else:                                         # Laptop-Aufzeichnung: gespeicherte Höhe
-            z = extra if extra is not None else START_HEIGHT
+            z, sens = (extra if extra is not None else START_HEIGHT), None
         if t_prev is not None and speed > 0:
             time.sleep(max(0.0, (t - t_prev) / speed))
         t_prev = t
-        q.put((ang, dist, z))
+        q.put((ang, dist, z, sens))
     q.put(None)
 
 
@@ -223,11 +224,11 @@ def main():
                 continue
             if item is None:
                 break
-            ang, dist, z = item
+            ang, dist, z, sens = item
             n_before = len(mp.traj)
-            world = mp.process(ang, dist)
+            world = mp.process(ang, dist, sens)
             if len(mp.traj) > n_before:          # Scan wurde akzeptiert
-                layers.update(z, mp.pose, world)
+                layers.update(z, mp.pose, world, mp.last_zrel)
 
             now = time.time()
             if args.no_gui or now - t_draw < 1.0 / lm.DRAW_HZ:

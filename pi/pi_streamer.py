@@ -3,13 +3,16 @@
 Dateien auf dem Pi (alle im selben Ordner):
     pi_streamer.py, tmini_plus.py, protocol.py
 Installation auf dem Pi:
-    pip3 install pyserial              (mit Flugcontroller zusätzlich: pip3 install pymavlink)
+    sudo apt install python3-serial
+    Mit Flugcontroller zusätzlich pymavlink (im venv):
+        python3 -m venv --system-site-packages ~/venv && ~/venv/bin/pip install pymavlink
+        und dann mit ~/venv/bin/python3 starten
 
 Start (normal): Pi wartet, bis sich der Laptop meldet
     python3 pi_streamer.py
     Laptop:  python lidar_map.py --pi PI_IP          (PI_IP = Tailscale-IP des Pi)
 
-    python3 pi_streamer.py --mav /dev/serial0 --mav-baud 115200
+    ~/venv/bin/python3 pi_streamer.py --mav /dev/serial0
                                                     # + Lage/Höhe vom Flugcontroller
 Alternativ (nur wenn der Pi den Laptop selbst erreichen darf):
     python3 pi_streamer.py --dest LAPTOP_IP:5005    Laptop: python lidar_map.py --udp 5005
@@ -24,7 +27,7 @@ import socket
 import threading
 import time
 
-from protocol import DEFAULT_PORT, HELLO, LEN, encode_pose, encode_scan
+from protocol import DEFAULT_PORT, HELLO, LEN, encode_pose, encode_range, encode_scan
 from tmini_plus import TMiniPlus
 
 
@@ -118,17 +121,21 @@ def mav_loop(args, out, stats, stop):
         print("[mav] kein Heartbeat vom Flugcontroller - nur LiDAR wird gesendet")
         return
     print(f"[mav] Heartbeat von System {m.target_system}")
-    for msg_id in (30, 32):  # ATTITUDE, LOCAL_POSITION_NED
+    for msg_id in (30, 32, 132):  # ATTITUDE, LOCAL_POSITION_NED, DISTANCE_SENSOR
         m.mav.command_long_send(m.target_system, m.target_component,
                                 mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
                                 msg_id, int(1e6 / args.mav_rate), 0, 0, 0, 0, 0)
     pos, pos_t = (math.nan,) * 3, 0.0
     while not stop.is_set():
-        msg = m.recv_match(type=["ATTITUDE", "LOCAL_POSITION_NED"], blocking=True, timeout=1)
+        msg = m.recv_match(type=["ATTITUDE", "LOCAL_POSITION_NED", "DISTANCE_SENSOR"], blocking=True, timeout=1)
         if msg is None:
             continue
         now = time.time()
-        if msg.get_type() == "LOCAL_POSITION_NED":
+        if msg.get_type() == "DISTANCE_SENSOR":
+            out.put(encode_range(now, msg.current_distance / 100.0, msg.orientation))
+            stats["rng"] += 1
+            stats["rng_last"] = msg.current_distance / 100.0
+        elif msg.get_type() == "LOCAL_POSITION_NED":
             pos, pos_t = (msg.x, msg.y, msg.z), now
         else:
             p = pos if now - pos_t < 0.5 else (math.nan,) * 3
@@ -144,7 +151,7 @@ def main():
     ap.add_argument("--log-dir", default="logs")
     ap.add_argument("--no-log", action="store_true", help="nicht lokal aufzeichnen")
     ap.add_argument("--mav", help="Flugcontroller, z. B. /dev/serial0 (leer = ohne)")
-    ap.add_argument("--mav-baud", type=int, default=115200, help="muss zu SERIALx_BAUD passen")
+    ap.add_argument("--mav-baud", type=int, default=460800, help="muss zu SERIALx_BAUD passen (bei euch SERIAL6 = 460800)")
     ap.add_argument("--mav-rate", type=float, default=20)
     args = ap.parse_args()
 
@@ -156,7 +163,7 @@ def main():
     print(f"Aufzeichnung: {log_path or 'aus'}   "
           + (f"UDP fest an {args.dest}" if args.dest else f"warte auf Laptop (Port {args.port})"))
 
-    stats = {"scans": 0, "points": 0, "att": 0, "cs_err": 0, "format": None}
+    stats = {"scans": 0, "points": 0, "att": 0, "rng": 0, "rng_last": None, "cs_err": 0, "format": None}
     stop = threading.Event()
     threads = [threading.Thread(target=lidar_loop, args=(args, out, stats, stop), daemon=True)]
     if args.mav:
@@ -176,6 +183,9 @@ def main():
                     f" | Prüfsummenfehler {stats['cs_err']} | UDP-Fehler {out.send_errors}")
             if args.mav:
                 line += f" | ATT {(stats['att'] - last['att']) / 5:.0f}/s"
+                line += f" | Höhenmesser {(stats['rng'] - last['rng']) / 5:.0f}/s"
+                if stats["rng_last"] is not None:
+                    line += f" ({stats['rng_last']:.2f} m)"
             print(line)
             last = dict(stats)
             if not threads[0].is_alive():

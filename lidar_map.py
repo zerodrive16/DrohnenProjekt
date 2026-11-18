@@ -52,6 +52,13 @@ MAX_RANGE = 10.0         # m, T-mini Plus schafft ~12 m
 FLIP = False             # True, falls die Karte spiegelverkehrt ist (LiDAR kopfüber)
 DESKEW = True            # Bewegungsverzerrung innerhalb eines Scans korrigieren
 
+# Lage vom Flugcontroller (nur wenn der Pi mit --mav läuft)
+TILT_COMP = True         # geneigte Scans in die Waagerechte umrechnen
+MAX_TILT_DEG = 15.0      # stärker geneigte Scans verwerfen (Ausgleich rechnet bis dahin sauber)
+LIDAR_YAW_OFFSET_DEG = 0.0   # Winkel zwischen 0°-Markierung des LiDARs und Drohnen-Vorderseite
+LIDAR_ABOVE_RANGEFINDER = 0.0  # m, wie viel höher der LiDAR als der Höhenmesser sitzt
+FLOOR_CLEARANCE = 0.10   # m, geneigter Strahl trifft den Boden -> Punkte darunter verwerfen
+
 # Korrelationssuche (normal / nach Verlust)
 SEARCH_YAW_DEG = (20.0, 60.0)
 SEARCH_XY_M = (0.35, 1.0)
@@ -226,7 +233,9 @@ def find_port():
 
 
 def udp_source(port, stop, stats, pi=None):
-    """Empfängt Scans vom Pi. Generator: (t, winkel, distanz, intensität, letzte_pose).
+    """Empfängt Scans vom Pi. Generator: (t, winkel, distanz, intensität, sensoren).
+
+    sensoren: dict mit roll, pitch, yaw, range, ekf_z zur Scanmitte (None = nicht vorhanden).
 
     pi gesetzt: Laptop meldet sich jede Sekunde beim Pi (HELLO), der Pi antwortet mit den Scans.
     pi leer:    Laptop wartet auf Port `port`, der Pi sendet von sich aus (--dest).
@@ -242,7 +251,7 @@ def udp_source(port, stop, stats, pi=None):
     else:
         print(f"[udp] warte auf Daten vom Pi auf Port {port} ...")
     asm = protocol.ScanAssembler()
-    pose = None
+    sens = protocol.SensorState()
     first = True
     try:
         while not stop.is_set():
@@ -265,15 +274,16 @@ def udp_source(port, stop, stats, pi=None):
                 print(f"[udp] Daten von {addr[0]}")
                 first = False
             typ, t, data = dec
-            if typ == protocol.T_POSE:
-                pose = data
-                stats["pose"] = data
+            if typ != protocol.T_SCAN:
+                sens.add(typ, t, data)
+                stats["pose"] = data if typ == protocol.T_POSE else stats.get("pose")
                 continue
             scan = asm.add(t, data)
             stats["lost"] = asm.lost
             if scan:
                 t, A, D, I = scan
-                yield t, np.array(A), np.array(D, dtype=np.float64), np.array(I, dtype=np.uint8), pose
+                yield (t, np.array(A), np.array(D, dtype=np.float64), np.array(I, dtype=np.uint8),
+                       sens.at(t - SCAN_MID))
     finally:
         sock.close()
 
@@ -281,19 +291,51 @@ def udp_source(port, stop, stats, pi=None):
 def bin_source(path):
     """Liest eine Pi-Aufzeichnung (.bin). Generator wie udp_source."""
     asm = protocol.ScanAssembler()
-    pose = None
+    sens = protocol.SensorState()
+    pending = []                                   # Scans kurz zurückhalten, bis Lage-Daten da sind
     for msg in protocol.read_log(path):
         dec = protocol.decode(msg)
         if dec is None:
             continue
         typ, t, data = dec
-        if typ == protocol.T_POSE:
-            pose = data
+        if typ != protocol.T_SCAN:
+            sens.add(typ, t, data)
             continue
         scan = asm.add(t, data)
         if scan:
-            t, A, D, I = scan
-            yield t, np.array(A), np.array(D, dtype=np.float64), np.array(I, dtype=np.uint8), pose
+            pending.append(scan)
+            while pending and pending[0][0] < t - 0.3:
+                yield _with_sensors(pending.pop(0), sens)
+    for sc in pending:
+        yield _with_sensors(sc, sens)
+
+
+def _with_sensors(scan, sens):
+    t, A, D, I = scan
+    return t, np.array(A), np.array(D, dtype=np.float64), np.array(I, dtype=np.uint8), sens.at(t - SCAN_MID)
+
+
+SCAN_MID = 0.08   # s, Zeitstempel = Scan-Ende; Lage zur Scanmitte nehmen
+
+
+def tilt_deg(sens):
+    if not sens or sens.get("roll") is None:
+        return None
+    return math.degrees(math.acos(max(-1.0, min(1.0, math.cos(sens["roll"]) * math.cos(sens["pitch"])))))
+
+
+def sensor_height(sens):
+    """Höhe des LiDARs über dem Boden: Höhenmesser (mit Neigung), sonst EKF, sonst None."""
+    if not sens:
+        return None
+    if sens.get("range") is not None and sens["range"] > 0.02:
+        c = 1.0
+        if sens.get("roll") is not None:
+            c = math.cos(sens["roll"]) * math.cos(sens["pitch"])
+        return sens["range"] * c + LIDAR_ABOVE_RANGEFINDER
+    if sens.get("ekf_z") is not None:
+        return -sens["ekf_z"]
+    return None
 
 
 def pkl_source(path):
@@ -311,10 +353,10 @@ def replay_source(path):
 
 
 def udp_thread(port, q, stop, record, stats, pi=None):
-    for t, ang, dist, inten, pose in udp_source(port, stop, stats, pi):
+    for t, ang, dist, inten, sens in udp_source(port, stop, stats, pi):
         if record is not None:
             record.append((t, ang, dist, inten))
-        q.put((ang, dist))
+        q.put((ang, dist, sens))
 
 
 def lidar_thread(port, q, stop, record):
@@ -336,13 +378,13 @@ def replay_thread(path, q, stop, speed):
     print(f"[replay] {path}")
     t_prev = None
     n = 0
-    for t, ang, dist, inten, _ in replay_source(path):
+    for t, ang, dist, inten, extra in replay_source(path):
         if stop.is_set():
             return
         if t_prev is not None and speed > 0:
             time.sleep(max(0.0, (t - t_prev) / speed))
         t_prev = t
-        q.put((ang, dist))
+        q.put((ang, dist, extra if isinstance(extra, dict) else None))
         n += 1
     print(f"[replay] {n} Scans abgespielt")
     q.put(None)
@@ -383,7 +425,24 @@ def scan_to_points(ang_deg, dist_mm):
     th = np.radians(ang_deg[ok])
     if not FLIP:
         th = -th                                # Uhrzeigersinn -> mathematisch positiv
+    th = th + math.radians(LIDAR_YAW_OFFSET_DEG)
     return np.column_stack((r[ok] * np.cos(th), r[ok] * np.sin(th))), frac[ok]
+
+
+def level_points(pts, roll, pitch):
+    """Geneigten Scan in die Waagerechte umrechnen.
+
+    pts: Punkte in der LiDAR-Ebene (x vorne, y links). roll/pitch wie ArduPilot
+    (roll: rechts runter positiv, pitch: Nase hoch positiv).
+    -> (Punkte waagerecht projiziert (N,2), Höhe jedes Punkts relativ zum LiDAR (N,))
+    """
+    xf, yf = pts[:, 0], -pts[:, 1]              # in Fahrzeug-Koordinaten vorne/rechts/unten
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    n = cp * xf + sp * sr * yf                  # R = Ry(pitch) * Rx(roll)
+    e = cr * yf
+    d = -sp * xf + cp * sr * yf
+    return np.column_stack((n, -e)), -d
 
 
 def deskew(pts, frac, vel):
@@ -694,6 +753,9 @@ class Mapper:
         self.traj = []
         self.n_scans = self.n_rejected = 0
         self.n_mirror = 0                       # erkannte Spiegelpunkte (gesamt)
+        self.n_tilt = 0                         # wegen zu starker Neigung verworfen
+        self.last_zrel = None                   # Höhe der Punkte relativ zum LiDAR (bei Neigung)
+        self.last_tilt = None
         self.last_score = self.last_ratio = 1.0
 
     def _match(self, ref, pts, frac, pred, wide):
@@ -710,11 +772,27 @@ class Mapper:
             vel = relative(self.pose, pose)
         return pose, ratio, vel
 
-    def process(self, ang, dist):
-        """Einen Scan verarbeiten. -> Weltpunkte des Scans (für die Anzeige)."""
+    def process(self, ang, dist, sens=None):
+        """Einen Scan verarbeiten. sens = Lage/Höhe vom FC (optional).
+
+        -> Weltpunkte des Scans (für die Anzeige). Bei akzeptiertem Scan steht in
+        self.last_zrel die Höhe jedes Punkts relativ zum LiDAR (oder None).
+        """
         pts, frac = scan_to_points(ang, dist)
         idx = self.n_scans
         self.n_scans += 1
+        self.last_zrel = None
+        zrel = None
+        self.last_tilt = tilt_deg(sens)
+        if TILT_COMP and self.last_tilt is not None:
+            if self.last_tilt > MAX_TILT_DEG:
+                self.n_tilt += 1
+                return np.zeros((0, 2))
+            pts, zrel = level_points(pts, sens["roll"], sens["pitch"])
+            h = sensor_height(sens)
+            if h is not None:                   # Bodentreffer des geneigten Strahls entfernen
+                keep = h + zrel > FLOOR_CLEARANCE
+                pts, frac, zrel = pts[keep], frac[keep], zrel[keep]
         if len(pts) < 50:
             return np.zeros((0, 2))
         pred = compose(self.pose, self.vel)
@@ -725,6 +803,7 @@ class Mapper:
             self.grid.update(pred, world)
             self.pose = pred
             self.traj.append([*pred, idx])
+            self.last_zrel = zrel
             return world
 
         pose, ratio, vel = self._match(ref, pts, frac, pred, wide=bool(self.lost))
@@ -746,6 +825,7 @@ class Mapper:
                 self.n_mirror += ng
             self.grid.update(pose, world)
             self.traj.append([*pose, idx])
+            self.last_zrel = zrel
             return world
 
         self.n_rejected += 1                    # Scan passt nicht: nicht in die Karte
@@ -808,7 +888,8 @@ def main():
             t_draw = now
             backlog = q.qsize() if not args.replay else 0
             state = "VERLOREN - langsam zurück zu bekanntem Bereich" if mp.lost > 3 else ""
-            info = (f"match={mp.last_ratio:.0%}  {hz:.1f} Hz  verworfen={mp.n_rejected}  Spiegelpkt={mp.n_mirror}"
+            tilt = f"  Neigung={mp.last_tilt:.0f}deg (verw. {mp.n_tilt})" if mp.last_tilt is not None else ""
+            info = (f"match={mp.last_ratio:.0%}  {hz:.1f} Hz  verworfen={mp.n_rejected}{tilt}"
                     + (f"  Rueckstand={backlog}" if backlog > 2 else "")
                 + (f"  UDP-Verlust={stats['lost']}" if args.udp else "") + f"  {state}")
             cv2.imshow("LiDAR-Karte", draw(mp.grid, mp.pose, mp.traj, world, info))
@@ -824,7 +905,7 @@ def main():
         pass
     finally:
         stop.set()
-        print(f"{mp.n_scans} Scans verarbeitet, {mp.n_rejected} verworfen, {mp.n_mirror} Spiegelpunkte entfernt")
+        print(f"{mp.n_scans} Scans verarbeitet, {mp.n_rejected} verworfen, {mp.n_tilt} wegen Neigung verworfen")
         mp.grid.save(args.save, mp.traj)
         if record:
             with open(args.record, "wb") as f:
