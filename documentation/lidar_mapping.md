@@ -4,13 +4,16 @@ Aus dem **YDLIDAR T-mini Plus** entsteht eine Karte. Die Position (x, y, Drehung
 aus den Scans geschätzt (Scan-Matching / SLAM), ohne GPS. Läuft der Pi mit Flugcontroller,
 kommen **Höhe** (Höhenmesser MTF-01P) und **Neigung** (Roll/Pitch) vom FC dazu.
 
+Alle Dateien liegen im Ordner `lidar/`. **Alle Befehle in dieser Doku werden in `lidar/` ausgeführt**
+(`cd lidar`); die Karten werden im aktuellen Ordner gespeichert.
+
 | Datei | Läuft auf | Aufgabe |
 |---|---|---|
-| `lidar_map.py` | Laptop | 2D-Karte: LiDAR-Treiber, Datenquellen, Neigungsausgleich, Scan-Matching, Occupancy Grid |
-| `lidar_map3d.py` | Laptop | 2,5D-Karte: eine 2D-Karte pro Höhenschicht → 3D-Punktwolke (`.ply`) |
-| `protocol.py` | beide | Nachrichtenformat Pi ↔ Laptop, Log-Format `.bin`, Zuordnung der FC-Werte zu den Scans |
-| `pi/pi_streamer.py` | Pi | LiDAR + Flugcontroller lesen, per UDP senden, als `.bin` aufzeichnen |
-| `pi/tmini_plus.py` | Pi | LiDAR-Treiber ohne numpy (für den Pi) |
+| `lidar/lidar_map.py` | Laptop | 2D-Karte: LiDAR-Treiber, Datenquellen, Neigungsausgleich, Scan-Matching, Occupancy Grid |
+| `lidar/lidar_map3d.py` | Laptop | 2,5D-Karte: eine 2D-Karte pro Höhenschicht → 3D-Punktwolke (`.ply`) |
+| `lidar/protocol.py` | beide | Nachrichtenformat Pi ↔ Laptop, Log-Format `.bin`, Zuordnung der FC-Werte zu den Scans |
+| `lidar/pi/pi_streamer.py` | Pi | LiDAR + Flugcontroller lesen, per UDP senden, als `.bin` aufzeichnen |
+| `lidar/pi/tmini_plus.py` | Pi | LiDAR-Treiber ohne numpy (für den Pi) |
 
 ```
  Pi ─────────────────────────────────────────────┐        Laptop ──────────────────────────────────────────
@@ -38,7 +41,7 @@ kommen **Höhe** (Höhenmesser MTF-01P) und **Neigung** (Roll/Pitch) vom FC dazu
    sudo apt install python3-serial
    python3 -m venv --system-site-packages ~/venv && ~/venv/bin/pip install pymavlink
    ```
-3. **Dateien auf den Pi kopieren** (vom Laptop, Projektordner):
+3. **Dateien auf den Pi kopieren** (vom Laptop, im Ordner `lidar/`):
    ```bash
    scp pi/pi_streamer.py pi/tmini_plus.py protocol.py pi:~/
    ```
@@ -312,7 +315,7 @@ und `lidar_map.bin_source()` macht daraus Scans mit Sensordaten.
 
 ---
 
-## Pi (`pi/pi_streamer.py`)
+## Pi (`lidar/pi/pi_streamer.py`)
 
 Liest den LiDAR (`tmini_plus.py`) und optional den Flugcontroller per MAVLink, schickt alles per
 UDP an den Laptop und zeichnet es als `logs/scan_JJJJMMTT_HHMMSS.bin` auf. Der Pi hat kein Git: Die
