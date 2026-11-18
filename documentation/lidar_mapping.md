@@ -203,7 +203,44 @@ kann das Matching auf der gemeinsamen 2D-Karte schlechter werden.
 ## Pi ↔ Laptop (`protocol.py`)
 
 Auf dem Pi liest `pi_streamer.py` den LiDAR (und optional den Flugcontroller per MAVLink)
-und schickt die Daten per UDP über Tailscale an den Laptop. Zusätzlich kann er sie als `.bin` aufzeichnen.
+und schickt die Daten per UDP über Tailscale an den Laptop. Zusätzlich zeichnet er sie als
+`logs/scan_JJJJMMTT_HHMMSS.bin` auf.
+
+### Dateien auf den Pi bringen
+Der Pi hat kein Git. Die Dateien werden im Repo bearbeitet und auf den Pi kopiert
+(`pi_streamer.py` und `tmini_plus.py` liegen in `pi/`, `protocol.py` im Hauptordner):
+
+```bash
+scp pi/pi_streamer.py pi/tmini_plus.py protocol.py pi:~/
+```
+
+(`pi` ist der Host-Eintrag in `~/.ssh/config`.) Auf dem Pi einmal installieren:
+`pip3 install pyserial` und mit Flugcontroller zusätzlich `pip3 install pymavlink`.
+
+### Start auf dem Pi
+
+```bash
+python3 pi_streamer.py                                   # wartet, bis sich der Laptop meldet
+python3 pi_streamer.py --mav /dev/serial0 --mav-baud 115200   # + Lage/Höhe vom Flugcontroller
+python3 pi_streamer.py --dest LAPTOP_IP:5005             # festes Ziel (Laptop: --udp 5005)
+```
+
+| Option | Standard | Bedeutung |
+|---|---|---|
+| `--lidar` | `/dev/ttyUSB0` | serieller Port des LiDAR |
+| `--port` | 5005 | Port, auf dem der Pi auf HELLO wartet |
+| `--dest IP:PORT` | – | festes Ziel statt auf den Laptop zu warten |
+| `--log-dir` | `logs` | Ordner für `.bin`-Aufzeichnungen |
+| `--no-log` | – | nicht aufzeichnen |
+| `--mav` | – | Flugcontroller-Port (z. B. `/dev/serial0`) |
+| `--mav-baud` | 115200 | muss zu `SERIALx_BAUD` im Flugcontroller passen |
+| `--mav-rate` | 20 Hz | Rate für ATTITUDE und LOCAL_POSITION_NED |
+
+Alle 5 s gibt er eine Statuszeile aus: Scans/s, Punkte pro Scan, Datenformat,
+ob der Laptop verbunden ist, Prüfsummen- und UDP-Fehler. Meldet sich der Laptop
+5 s lang nicht, pausiert das Senden, die Aufzeichnung läuft weiter. Mit `--mav`
+wird `T_POSE` bei jeder ATTITUDE-Nachricht gesendet. x/y/z sind NaN, wenn die letzte
+LOCAL_POSITION_NED älter als 0,5 s ist.
 
 ### Verbindungsaufbau
 Der Laptop schickt jede Sekunde `DRHELLO1` an den Pi (Port 5005). Der Pi sendet an die Adresse des
