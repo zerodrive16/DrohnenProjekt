@@ -5,7 +5,7 @@ aus den Scans geschätzt (Scan-Matching / SLAM), ohne GPS. Läuft der Pi mit Flu
 kommen **Höhe** (Höhenmesser MTF-01P) und **Neigung** (Roll/Pitch) vom FC dazu.
 
 Alle Dateien liegen im Ordner `lidar/`. **Alle Befehle in dieser Doku werden in `lidar/` ausgeführt**
-(`cd lidar`); die Karten werden im aktuellen Ordner gespeichert.
+(`cd lidar`). Die Karten landen in `lidar/karten/` (siehe [Ausgabedateien](#ausgabedateien)).
 
 | Datei | Läuft auf | Aufgabe |
 |---|---|---|
@@ -91,7 +91,7 @@ python lidar_map.py --replay scan_XXXX.bin  # Pi-Aufzeichnung abspielen (mit Lag
 | `--pi IP` | Scans vom Pi holen (Tailscale-IP), Laptop meldet sich per HELLO an |
 | `--udp PORT` | UDP-Port (Standard 5005); ohne `--pi`: warten, bis der Pi von sich aus sendet |
 | `--speed` | Replay-Tempo (1 = Echtzeit, 0 = maximal) |
-| `--save NAME` | Dateiname ohne Endung (Standard `karte`) |
+| `--save NAME` | Dateiname ohne Endung (Standard `karte` in `karten/<datum_zeit>/`); mit Ordner, z. B. `--save tests/flur`, wird genau dort gespeichert |
 | `--no-gui` | ohne Fenster |
 
 **Tasten:** `s` speichern · `r` Karte zurücksetzen · `q`/`ESC` beenden (speichert auch)
@@ -118,7 +118,22 @@ python lidar_map3d.py --replay raum3d.pkl --speed 0
 python lidar_map3d.py --replay scan_XXXX.bin
 ```
 
-Gleiche Optionen wie bei der 2D-Karte, Standardname ist `karte3d`.
+Gleiche Optionen wie bei der 2D-Karte, Standardname ist `karte3d`. Zusätzlich:
+
+| Option | Bedeutung |
+|---|---|
+| `--auto SEK` | alle SEK Sekunden automatisch eine Ebene höher, statt `+` zu drücken. Beim Wechsel piept es und im Terminal steht `>>> Neue Ebene: … m`; im Fenster läuft ein Countdown. Der Zähler startet mit dem ersten Scan, `+`/`-`/`p` starten ihn neu. |
+| `--times N` | mit `--auto`: Wenn die N-te Erhöhung fällig wird, endet der Scan und wird gespeichert (wie `q`). Gescannt werden also N Ebenen zu je SEK Sekunden; im Fenster steht auf der letzten Ebene `Ende in … s`. Ohne Angabe unbegrenzt. |
+| `--step M` | Höhenschritt pro Ebene in m (Standard 0,10), gilt für `--auto` und die Tasten |
+
+```bash
+python lidar_map3d.py --auto 20              # alle 20 s 10 cm höher
+python lidar_map3d.py --auto 15 --step 0.2   # alle 15 s 20 cm höher
+python lidar_map3d.py --auto 20 --times 5    # 5 Ebenen (0,0 … 0,4 m), nach 100 s Ende + Speichern
+```
+
+`--auto` gilt nur, solange kein Höhenmesser die Höhe liefert. Mit FC-Daten gewinnt der Höhenmesser,
+und beim Abspielen (`--replay`) wird `--auto` ignoriert.
 
 **Tasten:** `+`/`-` Höhe ±10 cm · `p` Höhe = 0 · `v` 3D-Ansicht · `s` speichern · `q`/`ESC` Ende.
 Die Höhentasten braucht man nur ohne Höhenmesser.
@@ -139,6 +154,11 @@ halten, damit die Position nicht verloren geht.
 ---
 
 ## Ausgabedateien
+
+Jeder Lauf speichert in einen eigenen Ordner **`lidar/karten/<JJJJMMTT_HHMMSS>/`**. So überschreibt
+kein Lauf den vorigen, und es mischen sich keine alten Schichten in eine neue 3D-Karte. Eine
+`--record`-Datei ohne Ordnerangabe landet ebenfalls dort. Der Ordner wird beim Start ausgegeben
+(`Ausgabe: ...`).
 
 | Datei | Inhalt |
 |---|---|

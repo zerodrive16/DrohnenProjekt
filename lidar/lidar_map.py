@@ -35,6 +35,7 @@ import struct
 import sys
 import threading
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -42,18 +43,21 @@ from scipy.spatial import cKDTree
 
 import protocol
 
+KARTEN_DIR = Path(__file__).resolve().parent / "karten"   # Ausgaben: karten/<datum_zeit>/
+
 # ======================================================================
 # EINSTELLUNGEN
 # ======================================================================
 MAP_SIZE_M = 60.0        # Kartengröße (quadratisch), Start in der Mitte
 RESOLUTION = 0.05        # m pro Zelle
 MIN_RANGE = 0.12         # m, kürzere Messungen ignorieren (z. B. eigene Hand)
+MIN_SCAN_POINTS = 200    # unvollständige Scans (z. B. der allererste) nicht in die Startkarte
 MAX_RANGE = 10.0         # m, T-mini Plus schafft ~12 m
 FLIP = False             # True, falls die Karte spiegelverkehrt ist (LiDAR kopfüber)
 DESKEW = True            # Bewegungsverzerrung innerhalb eines Scans korrigieren
 
 # Lage vom Flugcontroller (nur wenn der Pi mit --mav läuft)
-TILT_COMP = True         # geneigte Scans in die Waagerechte umrechnen
+TILT_COMP = False         # geneigte Scans in die Waagerechte umrechnen
 MAX_TILT_DEG = 15.0      # stärker geneigte Scans verwerfen (Ausgleich rechnet bis dahin sauber)
 LIDAR_YAW_OFFSET_DEG = 0.0   # Winkel zwischen 0°-Markierung des LiDARs und Drohnen-Vorderseite
 LIDAR_ABOVE_RANGEFINDER = 0.0  # m, wie viel höher der LiDAR als der Höhenmesser sitzt
@@ -75,6 +79,9 @@ MIN_INLIER_RATIO = 0.60  # Anteil Punkte < 10 cm an einer Wand, sonst Scan verwe
 MIN_KNOWN_POINTS = 80    # so viele Punkte müssen in bekannten Bereichen liegen
 RETRY_BELOW = 0.80       # Match darunter -> zusätzlich weiträumig suchen, das Bessere nehmen
 MIN_MAP_POINTS = 150     # erst ab so vielen Kartenpunkten wird gematcht
+START_THRESH = 0.5       # in der Startphase zählt schon eine einmal gesehene Wandzelle
+RELOC_AFTER = 12         # Scans (~2 s) ohne Treffer -> Anforderung an den Treffer senken ...
+RELAXED_RATIO = 0.40     # ... auf diesen Anteil, damit es nie dauerhaft hängen bleibt
 
 # Occupancy Grid (Log-Odds)
 L_OCC, L_FREE = 0.85, -0.4
@@ -338,6 +345,24 @@ def sensor_height(sens):
     return None
 
 
+def output_paths(save, record, default_name):
+    """Ausgabeort festlegen.
+
+    save ohne Ordner (oder leer) -> karten/<datum_zeit>/<save>, sonst genau dort.
+    record ohne Ordner -> in denselben Ordner wie die Karte.
+    -> (datei_präfix, record_pfad|None)
+    """
+    if save and Path(save).parent != Path("."):
+        prefix = Path(save)
+    else:
+        prefix = KARTEN_DIR / time.strftime("%Y%m%d_%H%M%S") / (save or default_name)
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    if record and Path(record).parent == Path("."):
+        record = str(prefix.parent / record)
+    print(f"Ausgabe: {prefix.parent}")
+    return str(prefix), record
+
+
 def pkl_source(path):
     """Liest eine Laptop-Aufzeichnung (.pkl). Generator: (t, winkel, distanz, intensität, höhe|None)."""
     with open(path, "rb") as f:
@@ -479,6 +504,8 @@ class Reference:
         win = grid.L[self.y0:y1, self.x0:x1]
         occ = win > L_OCC_THRESH
         self.known = np.abs(win) > 0.35          # schon beobachtet (frei oder Wand)
+        if occ.sum() < MIN_MAP_POINTS:           # Startphase: einmal gesehene Wände reichen
+            occ = win > START_THRESH
         ys, xs = np.nonzero(occ)
         if len(xs) < MIN_MAP_POINTS:
             return
@@ -755,6 +782,7 @@ class Mapper:
         self.n_mirror = 0                       # erkannte Spiegelpunkte (gesamt)
         self.n_tilt = 0                         # wegen zu starker Neigung verworfen
         self.last_zrel = None                   # Höhe der Punkte relativ zum LiDAR (bei Neigung)
+        self.n_reanchor = 0                     # nach langem Verlust mit gelockerter Schwelle angenommen
         self.last_tilt = None
         self.last_score = self.last_ratio = 1.0
 
@@ -799,6 +827,8 @@ class Mapper:
         ref = Reference(self.grid, pred, MAX_RANGE + 1.5)
 
         if not ref.ok:                          # Karte noch leer: einfach eintragen
+            if len(pts) < MIN_SCAN_POINTS:      # unvollständiger Scan: nicht als Start nehmen
+                return transform(pts, pred)
             world = transform(deskew(pts, frac, self.vel), pred)
             self.grid.update(pred, world)
             self.pose = pred
@@ -813,7 +843,10 @@ class Mapper:
                 pose, ratio, vel = pose2, ratio2, vel2
         self.last_ratio = ratio
 
-        if ratio >= MIN_INLIER_RATIO:
+        relaxed = self.lost > RELOC_AFTER and ratio >= RELAXED_RATIO
+        if relaxed:
+            self.n_reanchor += 1
+        if ratio >= MIN_INLIER_RATIO or relaxed:
             self.vel = 0.7 * vel + 0.3 * self.vel if not self.lost else vel
             self.pose = pose
             self.lost = 0
@@ -843,9 +876,10 @@ def main():
     ap.add_argument("--pi", metavar="IP", help="Scans vom Pi holen (Tailscale-IP des Pi, dort läuft pi_streamer.py)")
     ap.add_argument("--udp", type=int, metavar="PORT", help="Port (Standard 5005); ohne --pi: warten, bis der Pi sendet")
     ap.add_argument("--speed", type=float, default=1.0, help="Replay-Geschwindigkeit (0 = so schnell wie möglich)")
-    ap.add_argument("--save", default="karte", help="Dateiname (ohne Endung) zum Speichern")
+    ap.add_argument("--save", help="Dateiname ohne Endung (Standard: karten/<datum_zeit>/karte)")
     ap.add_argument("--no-gui", action="store_true")
     args = ap.parse_args()
+    args.save, args.record = output_paths(args.save, args.record, "karte")
 
     q = queue.Queue(maxsize=50 if args.replay else 0)
     stop = threading.Event()

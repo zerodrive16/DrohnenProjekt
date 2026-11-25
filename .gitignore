@@ -67,3 +67,4 @@ karte*
 *.pkl
 *.ply
 scan_*.bin
+lidar/karten/

@@ -16,6 +16,9 @@ Start:
     python lidar_map3d.py --replay raum3d.pkl --speed 0
     python lidar_map3d.py --pi 100.83.11.79      # LiDAR am Pi (pi_streamer.py läuft dort)
     python lidar_map3d.py --replay scan_XXXX.bin # Pi-Aufzeichnung abspielen
+    python lidar_map3d.py --auto 20              # alle 20 s automatisch eine Ebene (+10 cm) höher
+    python lidar_map3d.py --auto 15 --step 0.2   # alle 15 s um 20 cm höher
+    python lidar_map3d.py --auto 20 --times 5    # bei der 5. Erhöhung Ende (5 Ebenen, 100 s)
 
 Höhe: per Taste (+/-). Läuft der Pi mit Flugcontroller (pi_streamer.py --mav ...),
 kommt die Höhe automatisch vom Höhenmesser (MTF-01P), und die Neigung wird
@@ -188,9 +191,20 @@ def main():
     ap.add_argument("--pi", metavar="IP", help="Scans vom Pi holen (Tailscale-IP des Pi)")
     ap.add_argument("--udp", type=int, metavar="PORT", help="Port (Standard 5005)")
     ap.add_argument("--speed", type=float, default=1.0)
-    ap.add_argument("--save", default="karte3d")
+    ap.add_argument("--save", help="Dateiname ohne Endung (Standard: karten/<datum_zeit>/karte3d)")
     ap.add_argument("--no-gui", action="store_true")
+    ap.add_argument("--auto", type=float, metavar="SEK",
+                    help="alle SEK Sekunden automatisch eine Ebene höher (statt Taste +)")
+    ap.add_argument("--times", type=int, metavar="N",
+                    help="mit --auto: bei der N-ten Erhöhung endet der Scan und wird gespeichert "
+                         "(= N Ebenen; Standard: unbegrenzt)")
+    ap.add_argument("--step", type=float, default=HEIGHT_STEP, metavar="M",
+                    help=f"Höhenschritt pro Ebene in m (Standard {HEIGHT_STEP})")
     args = ap.parse_args()
+    args.save, args.record = lm.output_paths(args.save, args.record, "karte3d")
+    if args.auto and args.replay:
+        print("--auto gilt nur live, beim Abspielen kommt die Höhe aus der Aufzeichnung - ignoriert")
+        args.auto = None
 
     height = [START_HEIGHT]                      # Liste, damit der Thread die Änderung sieht
     q = queue.Queue(maxsize=50 if args.replay else 0)
@@ -212,6 +226,12 @@ def main():
     t_draw = 0.0
     z = height[0]
     print("Läuft. + / - = Höhe, v = 3D-Ansicht, s = speichern, q = Ende")
+    t_level = None                               # Start der aktuellen Ebene (für --auto), ab erstem Scan
+    n_auto = 0                                   # so oft wurde automatisch erhöht
+    if args.auto:
+        print(f"Auto-Ebenen: alle {args.auto:g} s um {args.step:.2f} m höher"
+              + (f", {args.times}-mal" if args.times else "")
+              + " (gilt nur, solange kein Höhenmesser die Höhe liefert)")
 
     try:
         while True:
@@ -231,23 +251,42 @@ def main():
                 layers.update(z, mp.pose, world, mp.last_zrel)
 
             now = time.time()
+            if t_level is None:
+                t_level = now
+            last_step = args.times is not None and n_auto + 1 >= args.times
+            if args.auto and now - t_level >= args.auto:
+                if last_step:                    # letzte Erhöhung fällig -> Scan beenden
+                    print(f"\a>>> {args.times}. Erhöhung erreicht - Scan beendet, speichere ...")
+                    break
+                height[0] = round(height[0] + args.step, 3)
+                t_level = now
+                n_auto += 1
+                print(f"\a>>> Neue Ebene: {height[0]:.2f} m - LiDAR jetzt anheben"
+                      + (f" ({n_auto}/{args.times})" if args.times else ""))
+                last_step = args.times is not None and n_auto + 1 >= args.times
             if args.no_gui or now - t_draw < 1.0 / lm.DRAW_HZ:
                 continue
             t_draw = now
             info = (f"Hoehe {z:.2f} m   Schichten {len(layers.layers)}"
                     f"   match={mp.last_ratio:.0%}   verworfen={mp.n_rejected}")
+            if args.auto:
+                rest = max(0.0, args.auto - (now - t_level))
+                info += f"   {'Ende' if last_step else 'naechste Ebene'} in {rest:.0f} s"
             cv2.imshow("LiDAR-Karte 3D (Draufsicht)", lm.draw(mp.grid, mp.pose, mp.traj, world, info))
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
             if key in (ord("+"), ord("=")):
-                height[0] = round(height[0] + HEIGHT_STEP, 3)
+                height[0] = round(height[0] + args.step, 3)
+                t_level = now                    # Auto-Zähler neu starten
                 print(f"Höhe: {height[0]:.2f} m")
             if key == ord("-"):
-                height[0] = round(height[0] - HEIGHT_STEP, 3)
+                height[0] = round(height[0] - args.step, 3)
+                t_level = now
                 print(f"Höhe: {height[0]:.2f} m")
             if key == ord("p"):
                 height[0] = 0.0
+                t_level = now
                 print("Höhe: 0.00 m")
             if key == ord("s"):
                 mp.grid.save(args.save + "_2d", mp.traj)
