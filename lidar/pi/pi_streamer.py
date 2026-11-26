@@ -10,15 +10,20 @@ Installation auf dem Pi:
 
 Start (normal): Pi wartet, bis sich der Laptop meldet
     python3 pi_streamer.py
-    Laptop:  python lidar_map.py --pi PI_IP          (PI_IP = Tailscale-IP des Pi)
+    Laptop:  python main.py --pi PI_IP          (PI_IP = Tailscale-IP des Pi)
 
     ~/venv/bin/python3 pi_streamer.py --mav /dev/serial0
                                                     # + Lage/Höhe vom Flugcontroller
+Hindernisvermeidung: Mit --mav schickt der Pi aus jedem LiDAR-Scan die kürzesten
+Abstände in 72 Richtungen (je 5°) als MAVLink OBSTACLE_DISTANCE an den Flugcontroller.
+ArduPilot bremst damit vor Hindernissen (Parameter: PRX1_TYPE=2, AVOID_ENABLE mit
+Proximity-Bit, siehe LIESMICH.md). Abschalten mit --no-obstacle.
+
 Alternativ (nur wenn der Pi den Laptop selbst erreichen darf):
-    python3 pi_streamer.py --dest LAPTOP_IP:5005    Laptop: python lidar_map.py --udp 5005
+    python3 pi_streamer.py --dest LAPTOP_IP:5005    Laptop: python main.py --udp 5005
 
 Aufzeichnungen landen in logs/scan_JJJJMMTT_HHMMSS.bin. Am Laptop abspielen mit:
-    python lidar_map.py --replay scan_....bin
+    python main.py --replay scan_....bin
 """
 import argparse
 import math
@@ -29,6 +34,41 @@ import time
 
 from protocol import DEFAULT_PORT, HELLO, LEN, encode_pose, encode_range, encode_scan
 from tmini_plus import TMiniPlus
+
+
+N_SECTORS = 72                 # 72 x 5 Grad = 360 Grad
+UNKNOWN = 65535                # MAVLink: keine Messung in diesem Sektor
+
+
+def obstacle_sectors(angles_deg, dists_mm, yaw_offset_deg, min_m, max_m):
+    """Kürzester Abstand (cm) je 5°-Sektor, Sektor 0 = vorne, im Uhrzeigersinn.
+
+    Der LiDAR misst wie MAVLink im Uhrzeigersinn. yaw_offset = Winkel, um den die
+    0°-Markierung des LiDARs gegenüber der Drohnenvorderseite verdreht ist.
+    Messungen unter min_m (eigene Arme/Propeller) werden ignoriert.
+    """
+    width = 360.0 / N_SECTORS
+    best = [UNKNOWN] * N_SECTORS
+    lo, hi = int(min_m * 100), int(max_m * 100)
+    for a, d in zip(angles_deg, dists_mm):
+        cm = int(d / 10)
+        if cm < lo:
+            continue
+        k = int(((a + yaw_offset_deg + width / 2) % 360.0) // width)
+        v = min(cm, hi + 1)                  # weiter als max = frei
+        if v < best[k]:
+            best[k] = v
+    return best
+
+
+class FcLink:
+    """Gemeinsame MAVLink-Verbindung: der MAVLink-Thread öffnet sie, der LiDAR-Thread sendet mit."""
+
+    def __init__(self):
+        self.m = None
+        self.lock = threading.Lock()
+        self.sectors = None                  # letzte Hindernisdaten aus dem LiDAR
+        self.sectors_t = 0.0
 
 
 class Output:
@@ -92,7 +132,7 @@ class Output:
                 self.log = None
 
 
-def lidar_loop(args, out, stats, stop):
+def lidar_loop(args, out, stats, stop, fc):
     lidar = TMiniPlus(args.lidar)
     lidar.start()
     print(f"[lidar] gestartet auf {args.lidar}")
@@ -103,6 +143,11 @@ def lidar_loop(args, out, stats, stop):
                 break
             for msg in encode_scan(scan_id, t, angles, dists, intens):
                 out.put(msg)
+            if not args.no_obstacle:
+                sec = obstacle_sectors(angles, dists, args.lidar_yaw_offset, args.obstacle_min, args.obstacle_max)
+                fc.sectors, fc.sectors_t = sec, time.time()
+                near = [v for v in sec if v != UNKNOWN]
+                stats["obst_min"] = min(near) / 100.0 if near else None
             scan_id += 1
             stats["scans"] += 1
             stats["points"] += len(angles)
@@ -112,15 +157,36 @@ def lidar_loop(args, out, stats, stop):
         lidar.stop()
 
 
-def mav_loop(args, out, stats, stop):
+def obstacle_loop(args, stats, stop, fc):
+    """Schickt die letzten Hindernisdaten mit 10 Hz an den FC (ArduPilot erwartet >= 10 Hz,
+    der LiDAR liefert ~6 Scans/s). Sind die Daten älter als 0,5 s (LiDAR ausgefallen),
+    wird nichts mehr gesendet - der FC merkt dann, dass der Sensor fehlt."""
+    while not stop.is_set():
+        time.sleep(0.1)
+        if fc.m is None or fc.sectors is None or time.time() - fc.sectors_t > 0.5:
+            continue
+        try:
+            with fc.lock:
+                fc.m.mav.obstacle_distance_send(
+                    int(time.time() * 1e6), 0, fc.sectors, 0,
+                    int(args.obstacle_min * 100), int(args.obstacle_max * 100),
+                    increment_f=360.0 / N_SECTORS, angle_offset=0.0, frame=12)   # 12 = MAV_FRAME_BODY_FRD
+            stats["obst"] += 1
+        except Exception as e:                         # FC-Verbindung weg: LiDAR läuft weiter
+            stats["obst_err"] = str(e)
+
+
+def mav_loop(args, out, stats, stop, fc):
     from pymavlink import mavutil
 
     print(f"[mav] verbinde mit {args.mav} ...")
-    m = mavutil.mavlink_connection(args.mav, baud=args.mav_baud)
+    m = mavutil.mavlink_connection(args.mav, baud=args.mav_baud,
+                                   source_system=1, source_component=191)  # 191 = Begleitrechner
     if m.wait_heartbeat(timeout=15) is None:
         print("[mav] kein Heartbeat vom Flugcontroller - nur LiDAR wird gesendet")
         return
     print(f"[mav] Heartbeat von System {m.target_system}")
+    fc.m = m
     for msg_id in (30, 32, 132):  # ATTITUDE, LOCAL_POSITION_NED, DISTANCE_SENSOR
         m.mav.command_long_send(m.target_system, m.target_component,
                                 mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
@@ -153,6 +219,11 @@ def main():
     ap.add_argument("--mav", help="Flugcontroller, z. B. /dev/serial0 (leer = ohne)")
     ap.add_argument("--mav-baud", type=int, default=460800, help="muss zu SERIALx_BAUD passen (bei euch SERIAL6 = 460800)")
     ap.add_argument("--mav-rate", type=float, default=20)
+    ap.add_argument("--no-obstacle", action="store_true", help="keine Hindernisdaten an den FC senden")
+    ap.add_argument("--lidar-yaw-offset", type=float, default=0.0,
+                    help="Grad, um die die 0°-Markierung des LiDARs gegen die Drohnenvorderseite verdreht ist (im Uhrzeigersinn)")
+    ap.add_argument("--obstacle-min", type=float, default=0.25, help="m, kürzere Messungen ignorieren (eigene Drohne)")
+    ap.add_argument("--obstacle-max", type=float, default=12.0, help="m, maximale Reichweite")
     args = ap.parse_args()
 
     log_path = None
@@ -163,11 +234,15 @@ def main():
     print(f"Aufzeichnung: {log_path or 'aus'}   "
           + (f"UDP fest an {args.dest}" if args.dest else f"warte auf Laptop (Port {args.port})"))
 
-    stats = {"scans": 0, "points": 0, "att": 0, "rng": 0, "rng_last": None, "cs_err": 0, "format": None}
+    stats = {"scans": 0, "points": 0, "att": 0, "rng": 0, "rng_last": None, "cs_err": 0, "format": None,
+             "obst": 0, "obst_min": None, "obst_err": None}
+    fc = FcLink()
     stop = threading.Event()
-    threads = [threading.Thread(target=lidar_loop, args=(args, out, stats, stop), daemon=True)]
+    threads = [threading.Thread(target=lidar_loop, args=(args, out, stats, stop, fc), daemon=True)]
     if args.mav:
-        threads.append(threading.Thread(target=mav_loop, args=(args, out, stats, stop), daemon=True))
+        threads.append(threading.Thread(target=mav_loop, args=(args, out, stats, stop, fc), daemon=True))
+        if not args.no_obstacle:
+            threads.append(threading.Thread(target=obstacle_loop, args=(args, stats, stop, fc), daemon=True))
     for th in threads:
         th.start()
 
@@ -186,6 +261,12 @@ def main():
                 line += f" | Höhenmesser {(stats['rng'] - last['rng']) / 5:.0f}/s"
                 if stats["rng_last"] is not None:
                     line += f" ({stats['rng_last']:.2f} m)"
+                if not args.no_obstacle:
+                    line += f" | Hindernis->FC {(stats['obst'] - last['obst']) / 5:.0f}/s"
+                    if stats["obst_min"] is not None:
+                        line += f" (nächstes {stats['obst_min']:.2f} m)"
+                    if stats["obst_err"]:
+                        line += f" FEHLER: {stats['obst_err']}"
             print(line)
             last = dict(stats)
             if not threads[0].is_alive():
