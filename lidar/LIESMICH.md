@@ -10,13 +10,13 @@
       sources.py          Datenquellen: USB-LiDAR, UDP vom Pi, Aufzeichnungen
       viz.py              Fenster und 3D-Ansicht
       protocol.py         Funkprotokoll Pi <-> Laptop (identisch mit pi/protocol.py)
-      tests/              Simulatoren + automatische Tests (nur lokal, nicht im Repo)
+      tests/              Simulatoren + automatische Tests
     pi/                   Raspberry Pi (nach ~/DrohnenProjekt)
       pi_streamer.py      LiDAR + FC-Daten an den Laptop, Hindernisdaten an den FC
       tmini_plus.py, protocol.py
 
 Die alten Skripte lidar_map.py, lidar_map3d.py, lidar_map_fc.py und lidar_map3d_fc.py
-sind durch main.py ersetzt und können gelöscht werden. Aus denselben Aufnahmen entstehen
+wurden entfernt und sind durch main.py ersetzt. Aus denselben Aufnahmen entstehen
 Byte für Byte dieselben Karten.
 
 ## Änderungen (Umbau auf main.py + Hindernisvermeidung)
